@@ -1,0 +1,6 @@
+; $id: $
+name = Vimeo API Utilities
+description = "A bucket connecting to the vimeo api"
+version = "7.x-1.0"
+core = 7.x
+package = Vimeo API

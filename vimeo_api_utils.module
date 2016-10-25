@@ -1,0 +1,488 @@
+<?php
+/**
+ *
+ * $Id:$
+ */
+
+/* Make sure you search for SET and set the necessary values. This also relies
+ * on specific content types, album and video.
+ */
+
+
+/*
+Module constants
+*/
+define('VIMEO_API', 'https://api.vimeo.com');
+define('API_HTTPGET', 'GET');
+define('API_HTTPPATCH', 'PATCH');
+define('API_HTTPPOST', 'POST');
+define('API_HTTPPUT', 'PUT');
+define('API_HTTPDELETE', 'DELETE');
+define('ALLOW_UPDATES', TRUE);
+
+
+
+/*
+ * Implements hook_menu()
+ */
+function vimeo_api_utils_menu() {
+	$items['vimeo/videos'] = array(
+		'page callback' => 'list_all_videos',
+		'access arguments' => TRUE,
+	);
+
+	return $items;
+}
+
+/*
+ * Implements hook_cron()
+ */
+function vimeo_api_utils_cron() {
+	$album_create = array();
+	$album_update = array();
+	$video_metadata = array();
+	$video_thumbnail = array();
+	$video_album = array();
+
+	$results = db_query('SELECT * FROM {vimeo_update_data} WHERE time < :time', array(
+		':time' => REQUEST_TIME,
+	))->fetchALL();
+
+
+	foreach ($results as $result) {
+		$type = $result->type;
+
+		switch ($type) {
+			case 'album_create':
+				$album_create[] = $result;
+				break;
+			case 'album_update':
+				$album_update[] = $result;
+				break;
+			case 'video_metadata':
+				$video_metadata[] = $result;
+				break;
+			case 'video_thumbnail':
+				$video_thumbnail[] = $result;
+				break;
+			case 'video_album':
+				$video_album[] = $result;
+				break;
+		}
+	}
+	storedAPICalls($album_create);
+	storedAPICalls($album_update);
+	storedAPICalls($video_metadata);
+	storedAPICalls($video_thumbnail);
+	storedAPICalls($video_album);
+}
+
+function storedAPICalls($calls) {
+	foreach ($calls as $call) {
+		$type = $call->type;
+		$nid = $call->nid;
+		$node_type = NULL;
+		$update = array();
+
+		switch ($type) {
+			case 'video_metadata':
+				$update = call_or_save_api(1, $nid, $type);
+				$node_type = 'video';
+				break;
+			case 'video_thumbnail':
+				$update = call_or_save_api(3, $nid, $type);
+				$node_type = 'video';
+				break;
+			case 'album_create':
+				$update = call_or_save_api(1, $nid, $type);
+				$node_type = 'album';
+				break;
+			case 'album_update':
+				$update = call_or_save_api(1, $nid, $type);
+				$node_type = 'album';
+				break;
+			case 'video_album':
+				$node = node_load($nid);
+				$vimeo_id = NULL;
+				// SET VIMEO ID
+				// SET Number of Albums
+				$number_albums = count($node->field_alumbs['und']);
+				$calls = 2 * $number_albums;
+
+				if (isset($vimeo_id)) {
+					$update = call_or_save_api($calls, $node->nid, 'video_album');
+				}
+		}
+
+		if (isset($update['call']) && $update['call']) {
+			switch ($node_type) {
+				case 'album':
+					$node = node_load($nid);
+					$album_id = NULL;
+					$name = NULL;
+					$description = NULL;
+
+					if (isset($node->field_album_id['und'][0]['value'])) {
+						$album_id = $node->field_album_id['und'][0]['value'];
+					}
+					if (isset($node->title)) {
+						$name = $node->title;
+					}
+					if (isset($node->body['und'][0]['value'])) {
+						$description = $node->body['und'][0]['value'];
+					}
+					break;
+				case 'video':
+					$node = node_load($nid);
+					$vimeo_id = NULL;
+					$name = NULL;
+					$description = NULL;
+
+					if (isset($node->field_vimeo_id['und'][0]['value'])) {
+						$vimeo_id = $node->field_vimeo_id['und'][0]['value'];
+					}
+					if (isset($node->title)) {
+						$name = $node->title;
+					}
+					if (isset($node->body['und'][0]['value'])) {
+						$description = $node->body['und'][0]['value'];
+					}
+					if (isset($node->field_thumbnail_image['und'][0]['fid'])) {
+						$file = file_load($node->field_thumbnail_image['und'][0]['fid']);
+					}
+					break;
+			}
+
+			switch ($type) {
+				case 'video_metadata':
+					if (isset($vimeo_id) && is_numeric($vimeo_id)) {
+						$response = updateVimeoMetadata($vimeo_id, $name, $description);
+						remove_stored_api_call($nid, $type);
+					}
+					break;
+				case 'video_thumbnail':
+					if (isset($vimeo_id) && is_numeric($vimeo_id)) {
+						$response = uploadVideoThumbnail($vimeo_id, $file);
+						remove_stored_api_call($nid, $type);
+					}
+					break;
+				case 'album_update':
+					if (isset($album_id) && is_numeric($album_id)) {
+						$response = updateAlbumMetadata($album_id, $name, $description);
+						remove_stored_api_call($nid, $type);
+					}
+					break;
+				case 'album_create':
+					if (!isset($album_id)) {
+						$response = createAlbum($name, $description);
+
+						$decoded_response = json_decode($response);
+
+						$uri = $decoded_response->uri;
+						$album_id = explode('/', $uri);
+						$album_id = $album_id[4];
+
+						$node->field_vimeo_album_id['und'][0]['value'] = $album_id;
+						node_save($node);
+						remove_stored_api_call($nid, $type);
+					}
+					elseif (isset($album_id)) {
+						remove_stored_api_call($nid, $type);
+					}
+					break;
+				case 'video_album':
+					if (isset($update['call']) && $update['call']) {
+						foreach ($node->field_albums['und'] as $album_id) {
+							$album = node_load($album_id['target_id']);
+							if (isset($album->field_vimeo_album_id['und'][0]['value'])) {
+								$album_id = $album->field_vimeo_album_id['und'][0]['value'];
+								$response = videoAlbum($vimeo_id, $album_id);
+
+								$decoded_response = json_decode($response);
+
+								if (isset($decoded_response->error)) {
+									$response = addVideoAlbum($vimeo_id, $album_id);
+								}
+								else {
+									remove_stored_api_call($nid, $type);
+								}
+							}
+						}
+					}
+					break;
+			}
+		}
+	}
+}
+
+function call_or_save_api($calls_needed, $nid, $type) {
+	$rate_limit = vimeo_rate_limit_get($calls_needed);
+	$time = $rate_limit['time'];
+
+	if ($rate_limit['continue']) {
+		return array(
+			'call' => TRUE,
+		);
+	}
+	else {
+		remove_stored_api_call($nid, $type);
+		store_api_call($nid, $type, $time);
+	}
+
+	return array(
+		'call' => FALSE,
+	);
+}
+
+function store_api_call($nid, $type, $time) {
+	db_insert('vimeo_update_data')
+		->fields(array(
+			'nid' => $nid,
+			'type' => $type,
+			'time' => $time))
+		->execute();
+}
+
+function remove_stored_api_call($nid, $type) {
+	db_delete('vimeo_update_data')
+		->condition('nid', $nid)
+		->condition('type', $type)
+		->execute();
+}
+
+function parse_headers($response) {
+	$headers = array();
+
+	$header_array = explode("\r\n", $response);
+
+	foreach ($header_array as $i => $line)
+		if ($i === 0)
+			$headers['http_code'] = $line;
+		else {
+			list ($key, $value) = explode(': ', $line);
+			$headers[$key] = $value;
+		}
+
+	return $headers;
+}
+
+function vimeo_rate_limit_set($response_header) {
+	$response = parse_headers($response_header);
+
+	$rate_limit_remaining = variable_get('rate_limit_remaining', 100);
+	$rate_limit_reset_time = strtotime(variable_get('rate_limit_reset_time', gmdate('Y-m-d H:i:s')));
+
+	if (isset($response['X-RateLimit-Remaining'])) {
+		$rate_limit_remaining = $response['X-RateLimit-Remaining'];
+	}
+	if (isset($response['X-RateLimit-Remaining'])) {
+		$rate_limit_reset_time = $response['X-RateLimit-Reset'];
+	}
+
+	variable_set('rate_limit_remaining', $rate_limit_remaining);
+	variable_set('rate_limit_reset_time', $rate_limit_reset_time);
+
+	return;
+}
+
+function vimeo_rate_limit_get($calls_needed) {
+	$rate_limit_remaining = variable_get('rate_limit_remaining', 100);
+	$rate_limit_reset_time = strtotime(variable_get('rate_limit_reset_time', date('Y-m-d H:i:s')));
+
+	$date = strtotime(date('Y-m-d H:i:s'));
+
+	if ($calls_needed < $rate_limit_remaining || $date >= $rate_limit_reset_time) {
+		return array(
+			'continue' => TRUE,
+			'time' => $rate_limit_reset_time,
+		);
+	}
+	else {
+		return array(
+			'continue' => FALSE,
+			'time' => $rate_limit_reset_time,
+		);
+	}
+}
+
+function list_all_videos() {
+	$videos = getVideos();
+
+	return $videos;
+}
+
+function uploadVideoThumbnail($video_id, $file) {
+	$res = thumbnailVimeo($video_id, $file);
+
+	$decoded_response = json_decode($res);
+
+	$uri = $decoded_response->uri;
+	$upload_link = $decoded_response->link;
+
+	$res = thumbnailUpload($upload_link, $file);
+
+	$res = activeThumbnail($uri);
+
+	return $res;
+}
+
+function updateVimeoMetadata($video_id, $name, $description) {
+	$method = '/videos/' . $video_id . '?fields=link';
+	$headers = getBearerHeader();
+
+	$parameters = array();
+	if (isset($name)) {
+		$parameters['name'] = $name;
+	}
+	if (isset($description)) {
+		$parameters['description'] = $description;
+	}
+
+	$parameters = http_build_query($parameters);
+	$res = callVimeoAPI($method, $headers, $parameters, API_HTTPPATCH);
+
+	return $res;
+}
+
+function thumbnailVimeo($video_id, $file) {
+	$method = '/videos/' . $video_id . '/pictures?fields=uri,link' ;
+	$headers = getBearerHeader();
+
+	$res = callVimeoAPI($method, $headers, NULL, API_HTTPPOST);
+
+	return $res;
+}
+
+function thumbnailUpload($upload_link, $file) {
+	$method = $upload_link;
+	$headers = getBearerHeader();
+
+	$parameters = file_get_contents($file->uri);
+
+	$res = callVimeoAPI($method, $headers, $parameters, API_HTTPPUT, FALSE);
+
+	return $res;
+}
+
+function activeThumbnail($method) {
+	$headers = getBearerHeader();
+
+	$method = $method . '?fields=uri';
+
+	$parameters = 'active=true';
+	$res = callVimeoAPI($method, $headers, $parameters, API_HTTPPATCH);
+
+	return $res;
+}
+
+function createAlbum($name, $description) {
+	$method = '/me/albums?fields=uri';
+	$headers = getBearerHeader();
+
+	$parameters = array();
+	$parameters['name'] = $name;
+	$parameters['description'] = $description;
+
+	$parameters = http_build_query($parameters);
+	$res = callVimeoAPI($method, $headers, $parameters, API_HTTPPOST);
+
+	return $res;
+}
+
+function updateAlbumMetadata($album_id, $name, $description) {
+	$method = '/me/albums/' . $album_id;
+	$headers = getBearerHeader();
+
+	$parameters = array();
+	if (isset($name)) {
+		$parameters['name'] = $name;
+	}
+	if (isset($description)) {
+		$parameters['description'] = $description;
+	}
+
+	$parameters = http_build_query($parameters);
+	$res = callVimeoAPI($method, $headers, $parameters, API_HTTPPATCH);
+
+	return $res;
+}
+
+function videoAlbum($vimeo_id, $album_id) {
+	$method = '/me/albums/' . $album_id . '/videos/' . $vimeo_id . '?fields=error';
+	$headers = getBearerHeader();
+
+	$res = callVimeoAPI($method, $headers, NULL, API_HTTPGET);
+
+	return $res;
+}
+
+function addVideoAlbum($vimeo_id, $album_id) {
+	$method = '/me/albums/' . $album_id . '/videos/' . $vimeo_id;
+	$headers = getBearerHeader();
+
+	$res = callVimeoAPI($method, $headers, NULL, API_HTTPPUT);
+
+	return $res;
+}
+
+function getVideos() {
+	$method = '/videos';
+	$headers = getBearerHeader();
+
+	$res = callVimeoAPI($method, $headers, NULL, API_HTTPGET);
+
+	return $res;
+}
+
+function getBearerHeader() {
+	// SET Bearer Token
+	$token = '';
+
+	$bearer_token = array('Authorization: Bearer ' . $token);
+
+	return $bearer_token;
+}
+
+function callVimeoAPI($method, $headers, $parameters, $http_method, $vimeo = TRUE) {
+	$headers[] = 'Content-Type: application/x-www-form-urlencoded';
+
+	if ($vimeo) {
+		$method_request = curl_init(VIMEO_API . $method);
+	}
+	else {
+		$method_request = curl_init($method);
+	}
+
+	if ($http_method == API_HTTPPOST) {
+		curl_setopt($method_request, CURLOPT_POST, TRUE);
+	}
+	elseif ($http_method == API_HTTPGET) {
+		curl_setopt($method_request, CURLOPT_POST, FALSE);
+		curl_setopt($method_request, CURLOPT_HTTPGET, TRUE);
+		curl_setopt($method_request, CURLOPT_CUSTOMREQUEST, $http_method);
+	}
+	else {
+		curl_setopt($method_request, CURLOPT_POST, FALSE);
+		curl_setopt($method_request, CURLOPT_HTTPGET, FALSE);
+		curl_setopt($method_request, CURLOPT_CUSTOMREQUEST, $http_method);
+	}
+
+	curl_setopt($method_request, CURLOPT_RETURNTRANSFER, TRUE);
+	curl_setopt($method_request, CURLOPT_POSTFIELDS, $parameters);
+	curl_setopt($method_request, CURLOPT_HEADER,  1);
+	curl_setopt($method_request, CURLOPT_HTTPHEADER, $headers);
+
+	$full_result = curl_exec($method_request);
+
+	$sections = explode("\x0d\x0a\x0d\x0a", $full_result, 2);
+	while (!strncmp($sections[1], 'HTTP/', 5)) {
+		$sections = explode("\x0d\x0a\x0d\x0a", $sections[1], 2);
+	}
+
+	$response_headers = $sections[0];
+	$call_result = $sections[1];
+
+	vimeo_rate_limit_set($response_headers);
+
+	return $call_result;
+}

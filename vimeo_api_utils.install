@@ -1,0 +1,43 @@
+<?php
+
+/**
+ * @file
+ * Manages the installation of the Vimeo API module.
+ */
+
+
+// Implements hook_schema().
+function vimeo_api_utils_schema() {
+	$schema = array();
+	$schema['vimeo_update_data'] = array(
+		'description' => 'Stores api calls for cron when over the limit',
+		'fields' => array(
+			'api_id' => array(
+				'type' => 'serial',
+				'unsigned' => TRUE,
+				'not null' => TRUE,
+			),
+			'nid' => array(
+				'type' => 'int',
+				'size' => 'small',
+				'not null' => TRUE,
+				'description' => 'The Node to update',
+			),
+			'type' => array(
+				'type' => 'varchar',
+				'length' => 25,
+				'not null' => TRUE,
+				'description' => 'A switch to tell cron which method to call',
+			),
+			'time' => array(
+				'type' => 'int',
+				'size' => 'normal',
+				'not null' => TRUE,
+				'description' => 'Timestamp when the call can be made',
+			),
+		),
+		'primary key' => array('api_id'),
+	);
+
+	return $schema;
+}
