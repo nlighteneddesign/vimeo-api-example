@@ -6,6 +6,23 @@
 
 /* Make sure you search for SET and set the necessary values. This also relies
  * on specific content types, album and video.
+ *
+ * This will update any node or video with an existing video id or album id
+ * It will auto create albums as necessary but will not upload videos
+ * If you need video upload send a message.
+ *
+ * video content type
+ * title
+ * body
+ * field_thumbnail_image (image)
+ * field_vimeo_id (text)
+ * field_albums (entity reference)
+ * field_vimeo_url (video embed)
+ *
+ * album content type
+ * title
+ * body
+ * field_vimeo_album_id (text)
  */
 
 
@@ -32,6 +49,130 @@ function vimeo_api_utils_menu() {
 	);
 
 	return $items;
+}
+
+/*
+ * Implements hook_node_presave()
+ */
+function video_choice_utils_node_presave($node) {
+	$type = $node->type;
+
+	switch ($type) {
+		case 'album':
+			$name = NULL;
+			$description = NULL;
+			$album_id = NULL;
+			if (isset($node->field_vimeo_album_id['und'][0]['value'])) {
+				$album_id = $node->field_vimeo_album_id['und'][0]['value'];
+			}
+
+			if (!$album_id) {
+				$update = call_or_save_api(1, $node->nid, 'album_create');
+				if (isset($update['call']) && $update['call']) {
+					if (isset($node->title)) {
+						$name = $node->title;
+					}
+					if (isset($node->body['und'][0]['value'])) {
+						$description = $node->body['und'][0]['value'];
+					}
+					$response = createAlbum($name, $description);
+
+					$decoded_response = json_decode($response);
+
+					$uri = $decoded_response->uri;
+					$album_id = explode('/', $uri);
+					$album_id = $album_id[4];
+
+					$node->field_vimeo_album_id['und'][0]['value'] = $album_id;
+
+				}
+			}
+			elseif (isset($node->original->field_vimeo_album_id['und'][0]['value']) && $node->original->field_vimeo_album_id['und'][0]['value'] != $node->field_vimeo_album_id['und'][0]['value']) {
+				if (isset($node->title) && $node->original->title != $node->title) {
+					$name = $node->title;
+				}
+				if (isset($node->body['und'][0]['value']) && $node->original->body['und'][0]['value'] != $node->body['und'][0]['value']) {
+					$description = $node->body['und'][0]['value'];
+				}
+
+				if (($name || $description) && $album_id) {
+					$update = call_or_save_api(1, $node->nid, 'album_update');
+					if (isset($update['call']) && $update['call']) {
+						$response = updateAlbumMetadata($album_id, $name, $description);
+					}
+				}
+			}
+			break;
+		case 'video':
+			$vimeo_id = NULL;
+			$name = NULL;
+			$description = NULL;
+			$file = NULL;
+			$update = array();
+
+			if (isset($node->field_vimeo_id['und'][0]['value'])) {
+				$vimeo_id = $node->field_vimeo_id['und'][0]['value'];
+			}
+			if (isset($node->title) && $node->original->title != $node->title) {
+				$name = $node->title;
+			}
+			if (isset($node->body['und'][0]['value']) && $node->original->body['und'][0]['value'] != $node->body['und'][0]['value']) {
+				$description = $node->body['und'][0]['value'];
+			}
+			if (($name || $description) && isset($vimeo_id)) {
+				$update = call_or_save_api(1, $node->nid, 'video_metadata');
+			}
+
+			if (isset($update['call']) && $update['call'] && ALLOW_UPDATES) {
+				$name = $node->title;
+				$description = $node->body['und'][0]['value'];
+				$response = updateVimeoMetadata($vimeo_id, $name, $description);
+			}
+
+			$update = array();
+
+			if (isset($node->field_poster_image['und'][0]['fid']) && $node->original->field_poster_image['und'][0]['fid'] != $node->field_poster_image['und'][0]['fid'] && isset($vimeo_id)) {
+				$update = call_or_save_api(3, $node->nid, 'video_thumbnail');
+			}
+
+			if (isset($update['call']) && $update['call'] && ALLOW_UPDATES) {
+				$file = file_load($node->field_poster_image['und'][0]['fid']);
+				$response = uploadVideoThumbnail($vimeo_id, $file);
+			}
+
+			$update = array();
+
+			if (isset($node->field_scholars['und'][0]['target_id']) && ($node->original->field_scholars !== $node->field_scholars)) {
+				$number_scholars = count($node->field_scholars['und']);
+				$calls = 2 * $number_scholars;
+
+				if (isset($vimeo_id)) {
+					$update = call_or_save_api($calls, $node->nid, 'video_album');
+				}
+
+				if (isset($update['call']) && $update['call'] && ALLOW_UPDATES) {
+					foreach ($node->field_scholars['und'] as $scholar_id) {
+						$scholar = node_load($scholar_id['target_id']);
+						if (isset($scholar->field_vimeo_album_id['und'][0]['value'])) {
+							$album_id = $scholar->field_vimeo_album_id['und'][0]['value'];
+							$response = videoAlbum($vimeo_id, $album_id);
+
+							$decoded_response = json_decode($response);
+
+							if (isset($decoded_response->error)) {
+								$response = addVideoAlbum($vimeo_id, $album_id);
+							}
+						}
+					}
+				}
+			}
+
+			$update = array();
+
+			break;
+	}
+
+	return;
 }
 
 /*
@@ -104,9 +245,10 @@ function storedAPICalls($calls) {
 			case 'video_album':
 				$node = node_load($nid);
 				$vimeo_id = NULL;
-				// SET VIMEO ID
-				// SET Number of Albums
-				$number_albums = count($node->field_alumbs['und']);
+				if (isset($node->field_vimeo_id['und'][0]['value'])) {
+					$vimeo_id = $node->field_vimeo_id['und'][0]['value'];
+				}
+				$number_albums = count($node->field_albums['und']);
 				$calls = 2 * $number_albums;
 
 				if (isset($vimeo_id)) {
@@ -122,8 +264,8 @@ function storedAPICalls($calls) {
 					$name = NULL;
 					$description = NULL;
 
-					if (isset($node->field_album_id['und'][0]['value'])) {
-						$album_id = $node->field_album_id['und'][0]['value'];
+					if (isset($node->field_vimeo_album_id['und'][0]['value'])) {
+						$album_id = $node->field_vimeo_album_id['und'][0]['value'];
 					}
 					if (isset($node->title)) {
 						$name = $node->title;
