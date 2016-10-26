@@ -568,7 +568,7 @@ function addVideoAlbum($vimeo_id, $album_id) {
 }
 
 function getVideos() {
-	$method = '/videos';
+	$method = '/me/videos';
 	$headers = getBearerHeader();
 
 	$res = callVimeoAPI($method, $headers, NULL, API_HTTPGET);
